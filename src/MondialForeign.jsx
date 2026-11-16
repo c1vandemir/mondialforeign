@@ -40,6 +40,7 @@ const COPY = {
     cta: "Nous contacter",
     legendOrigin: "Départ — Turquie",
     legendDest: (n) => `${n} pays africains desservis`,
+    capitals: "Pays francophones · Capitales",
     services: "Import · Export · Logistique",
     route: "Turquie → Afrique",
     globe: { africa: "AFRIQUE", turkey: "TURQUIE" },
@@ -57,6 +58,7 @@ const COPY = {
     cta: "Contact us",
     legendOrigin: "Origin — Türkiye",
     legendDest: (n) => `${n} African countries served`,
+    capitals: "Francophone countries · Capitals",
     services: "Import · Export · Logistics",
     route: "Türkiye → Africa",
     globe: { africa: "AFRICA", turkey: "TÜRKİYE" },
@@ -188,6 +190,26 @@ const DESTINATIONS = [
   { name: "Praia", lat: 14.93, lon: -23.51 },
 ];
 
+// Hizmet verilen ülke sayısı (Côte d'Ivoire'ın iki şehri tek ülke sayılır)
+const COUNTRY_COUNT = new Set(DESTINATIONS.map((d) => d.country || d.name)).size;
+
+// Ülke adlarının İngilizcesi (Fransızcadan farklı olanlar)
+const COUNTRY_EN = {
+  "Sénégal": "Senegal", "Guinée": "Guinea", "Bénin": "Benin", "Mauritanie": "Mauritania",
+  "Cameroun": "Cameroon", "Guinée équatoriale": "Equatorial Guinea", "RD Congo": "DR Congo",
+  "Centrafrique": "Central African Rep.", "Tchad": "Chad", "Comores": "Comoros",
+  "Maurice": "Mauritius", "Maroc": "Morocco", "Algérie": "Algeria", "Tunisie": "Tunisia",
+};
+
+// Telefon görünümündeki liste: frankofon ülke → başkent(ler)
+const FRANCOPHONE = DESTINATIONS.filter((d) => d.fr).reduce((acc, d) => {
+  const row = acc.find((r) => r.country === d.country);
+  if (row) row.cities.push(d);
+  else acc.push({ country: d.country, cities: [d] });
+  return acc;
+}, []);
+for (const row of FRANCOPHONE) row.cities.sort((a, b) => (a.name === "Yamoussoukro" ? -1 : b.name === "Yamoussoukro" ? 1 : 0));
+
 /* ------------------------------------------------------------------ */
 /*  Geometri yardımcıları                                              */
 /* ------------------------------------------------------------------ */
@@ -275,7 +297,11 @@ function buildArc(a, b, segments = 80) {
 const VIEW_LON = 16 * D2R;
 const VIEW_LAT = 11 * D2R;
 
-function GlobeCanvas({ mouse, lang }) {
+/**
+ * compact = telefon/tablet: küre kendi kutusunda ortalanır ve şehir adları
+ * küre üzerine yazılmaz (sayfada ayrı liste olarak gösterilir).
+ */
+function GlobeCanvas({ mouse, lang, compact = false }) {
   const canvasRef = useRef(null);
   const reduceMotion = useReducedMotion();
   // dil değişince animasyon döngüsü yeniden başlamasın diye ref ile okunur
@@ -285,7 +311,7 @@ function GlobeCanvas({ mouse, lang }) {
   useEffect(() => {
     const canvas = canvasRef.current;
     const ctx = canvas.getContext("2d");
-    let w = 0, h = 0, dpr = 1, R = 0, cx0 = 0, cy0 = 0, wide = false, raf = 0;
+    let w = 0, h = 0, dpr = 1, R = 0, cx0 = 0, cy0 = 0, raf = 0;
 
     const { pos: dots, type: dotType } = buildDots();
     const dotCount = dotType.length;
@@ -311,6 +337,7 @@ function GlobeCanvas({ mouse, lang }) {
     const proj = new Float32Array(81 * 3);
     const o = [0, 0, 0];
     const m = { x: 0, y: 0 };
+    const labelSide = new Map(); // her etiketin son yönü — kare kare zıplamasın
 
     const resize = () => {
       const r = canvas.getBoundingClientRect();
@@ -319,19 +346,20 @@ function GlobeCanvas({ mouse, lang }) {
       dpr = Math.min(window.devicePixelRatio || 1, 2);
       canvas.width = Math.round(w * dpr);
       canvas.height = Math.round(h * dpr);
-      wide = w >= 1024;
-      if (wide) {
+      if (compact) {
+        // kendi kutusunda ortalı; atmosfer halesi kenarlardan taşmasın
+        R = Math.min(w, h) * 0.4;
+        cx0 = w / 2;
+        cy0 = h / 2;
+      } else {
         R = Math.min(w * 0.3, h * 0.43);
         cx0 = w * 0.7;
         cy0 = h * 0.53;
-      } else {
-        R = Math.min(w * 0.52, h * 0.36);
-        cx0 = w / 2;
-        cy0 = h * 0.66;
       }
     };
     resize();
-    window.addEventListener("resize", resize);
+    const ro = new ResizeObserver(resize);
+    ro.observe(canvas);
 
     const frame = (nowMs) => {
       const t = nowMs / 1000;
@@ -445,6 +473,7 @@ function GlobeCanvas({ mouse, lang }) {
       label(trLabel, names.turkey, `600 ${Math.max(10, Math.round(R / 30))}px Manrope, sans-serif`, "rgba(255,150,105,0.95)", "3px");
 
       // --- sevkiyat rotaları ---
+      const cityLabels = []; // şehir adları rotalardan sonra, çakışmasız yerleşimle çizilir
       ctx.lineCap = "round";
       for (const d of dests) {
         const n = d.pts.length / 3;
@@ -527,20 +556,8 @@ function GlobeCanvas({ mouse, lang }) {
             ctx.beginPath();
             ctx.arc(x, y, 2.2, 0, TAU);
             ctx.fill();
-            if (R > 150) {
-              const fs = R > 330 ? 11 : R > 230 ? 10 : 9;
-              ctx.font = `500 ${fs}px Manrope, sans-serif`;
-              ctx.fillStyle = `rgba(226,236,252,${0.9 * depth})`;
-              if (d.side === "l") {
-                ctx.textAlign = "right";
-                ctx.fillText(cityName(d), x - 6, y + 3.5);
-              } else if (d.side === "b") {
-                ctx.textAlign = "center";
-                ctx.fillText(cityName(d), x, y + fs + 5);
-              } else {
-                ctx.textAlign = "left";
-                ctx.fillText(cityName(d), x + 6, y + 3.5);
-              }
+            if (!compact && R > 150) {
+              cityLabels.push({ d, x, y, fs: R > 330 ? 11 : R > 230 ? 10 : 9, color: `rgba(226,236,252,${0.9 * depth})` });
             }
           } else {
             if (arrival < 0.14) {
@@ -555,13 +572,52 @@ function GlobeCanvas({ mouse, lang }) {
             ctx.beginPath();
             ctx.arc(x, y, 1.5, 0, TAU);
             ctx.fill();
-            if (d.label && R > 220) {
-              ctx.font = `500 ${R > 330 ? 11 : 10}px Manrope, sans-serif`;
-              ctx.textAlign = "left";
-              ctx.fillStyle = `rgba(203,219,240,${0.6 * depth})`;
-              ctx.fillText(cityName(d), x + 6, y + 3.5);
+            if (!compact && d.label && R > 220) {
+              cityLabels.push({ d, x, y, fs: R > 330 ? 11 : 10, color: `rgba(203,219,240,${0.6 * depth})` });
             }
           }
+        }
+      }
+
+      // --- şehir adları: tercih edilen yön doluysa boş bir yöne kaydırılır ---
+      if (cityLabels.length) {
+        const placed = [];
+        // diğer şehir noktalarının üstüne yazı gelmesin
+        const dotsBox = cityLabels.map((l) => ({ x0: l.x - 3, y0: l.y - 3, x1: l.x + 3, y1: l.y + 3, own: l }));
+        const overlap = (a, b) =>
+          Math.max(0, Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0)) * Math.max(0, Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0));
+        ctx.textAlign = "left";
+        // frankofon başkentler önce yerleşir
+        const order = cityLabels.slice().sort((a, b) => (b.d.fr ? 1 : 0) - (a.d.fr ? 1 : 0));
+        for (const l of order) {
+          const text = cityName(l.d);
+          ctx.font = `500 ${l.fs}px Manrope, sans-serif`;
+          const tw = ctx.measureText(text).width;
+          const { x, y, fs } = l;
+          const boxes = {
+            r: [x + 6, y - fs * 0.5], l: [x - 6 - tw, y - fs * 0.5],
+            b: [x - tw / 2, y + 5], t: [x - tw / 2, y - 5 - fs],
+            ur: [x + 4, y - 3 - fs], ul: [x - 4 - tw, y - 3 - fs],
+            br: [x + 4, y + 3], bl: [x - 4 - tw, y + 3],
+          };
+          const pref = l.d.side || "r";
+          const tries = [labelSide.get(text), pref, "r", "l", "ur", "br", "ul", "bl", "t", "b"].filter(
+            (k, i, arr) => k && arr.indexOf(k) === i
+          );
+          let best = null, bestScore = Infinity;
+          for (const k of tries) {
+            const [bx, by] = boxes[k];
+            const box = { x0: bx - 1, y0: by - 1, x1: bx + tw + 1, y1: by + fs + 1 };
+            let score = 0;
+            for (const p of placed) score += overlap(box, p);
+            for (const p of dotsBox) if (p.own !== l) score += overlap(box, p);
+            if (score < bestScore) { best = { k, box }; bestScore = score; }
+            if (score === 0) break;
+          }
+          labelSide.set(text, best.k);
+          placed.push(best.box);
+          ctx.fillStyle = l.color;
+          ctx.fillText(text, best.box.x0 + 1, best.box.y0 + 1 + fs * 0.8);
         }
       }
 
@@ -589,9 +645,9 @@ function GlobeCanvas({ mouse, lang }) {
 
     return () => {
       cancelAnimationFrame(raf);
-      window.removeEventListener("resize", resize);
+      ro.disconnect();
     };
-  }, [mouse, reduceMotion]);
+  }, [mouse, reduceMotion, compact]);
 
   return <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" aria-hidden="true" />;
 }
@@ -817,7 +873,22 @@ function Swap({ k, children }) {
 
 const EASE = [0.22, 1, 0.36, 1];
 
+/** lg (≥1024px) ve üstü: küre arka planda; altı: küre metnin altında kendi bölümünde. */
+const DESKTOP_MQ = "(min-width: 1024px)";
+function useIsDesktop() {
+  const [desktop, setDesktop] = useState(() => typeof window !== "undefined" && window.matchMedia(DESKTOP_MQ).matches);
+  useEffect(() => {
+    const mq = window.matchMedia(DESKTOP_MQ);
+    const on = () => setDesktop(mq.matches);
+    on();
+    mq.addEventListener("change", on);
+    return () => mq.removeEventListener("change", on);
+  }, []);
+  return desktop;
+}
+
 export default function MondialForeign() {
+  const isDesktop = useIsDesktop();
   const [lang, setLang] = useState(readLang);
   const [switched, setSwitched] = useState(false);
   const c = COPY[lang];
@@ -851,6 +922,7 @@ export default function MondialForeign() {
   const chromeY = useTransform(sy, (v) => v * -4);
 
   const handleMove = (e) => {
+    if (e.pointerType === "touch") return; // telefonda kaydırırken yazılar oynamasın
     const x = (e.clientX / window.innerWidth) * 2 - 1;
     const y = (e.clientY / window.innerHeight) * 2 - 1;
     mouse.current = { x, y };
@@ -867,7 +939,7 @@ export default function MondialForeign() {
     <main
       onPointerMove={handleMove}
       onPointerLeave={handleLeave}
-      className="relative flex h-[100svh] min-h-[640px] w-full flex-col overflow-hidden bg-[#03060f] text-slate-200 antialiased selection:bg-orange-500/30"
+      className="relative flex min-h-[100svh] w-full flex-col overflow-hidden bg-[#03060f] text-slate-200 antialiased selection:bg-orange-500/30 lg:min-h-[max(100svh,640px)]"
       style={{ fontFamily: "'Manrope', ui-sans-serif, system-ui, sans-serif" }}
     >
       <style>{GLOBAL_CSS}</style>
@@ -891,20 +963,21 @@ export default function MondialForeign() {
         />
       </motion.div>
 
-      {/* ---------- Küre ---------- */}
-      <motion.div
-        className="absolute inset-0"
-        initial={{ opacity: 0, scale: 0.92, filter: "blur(10px)" }}
-        animate={{ opacity: 1, scale: 1, filter: "blur(0px)" }}
-        transition={{ duration: 2.6, ease: EASE }}
-      >
-        <GlobeCanvas mouse={mouse} lang={lang} />
-      </motion.div>
+      {/* ---------- Küre (masaüstü: tüm arka plan) ---------- */}
+      {isDesktop && (
+        <motion.div
+          className="absolute inset-0"
+          initial={{ opacity: 0, scale: 0.92, filter: "blur(10px)" }}
+          animate={{ opacity: 1, scale: 1, filter: "blur(0px)" }}
+          transition={{ duration: 2.6, ease: EASE }}
+        >
+          <GlobeCanvas mouse={mouse} lang={lang} />
+        </motion.div>
+      )}
 
-      {/* ---------- Okunabilirlik katmanları ---------- */}
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_60%_42%_at_50%_48%,rgba(3,6,15,0.78),rgba(3,6,15,0.3)_60%,transparent_80%)] lg:hidden" />
+      {/* ---------- Okunabilirlik katmanları (masaüstü) ---------- */}
       <div className="pointer-events-none absolute inset-0 hidden bg-[linear-gradient(90deg,rgba(3,6,15,0.9)_0%,rgba(3,6,15,0.55)_38%,transparent_58%)] lg:block" />
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_center,transparent_55%,rgba(0,0,0,0.7)_100%)]" />
+      <div className="pointer-events-none absolute inset-0 hidden bg-[radial-gradient(ellipse_at_center,transparent_55%,rgba(0,0,0,0.7)_100%)] lg:block" />
       <div className="pointer-events-none absolute inset-0 opacity-[0.07] mix-blend-overlay" style={{ backgroundImage: GRAIN }} />
 
       {/* ---------- Üst bar ---------- */}
@@ -931,7 +1004,7 @@ export default function MondialForeign() {
       {/* ---------- Hero ---------- */}
       <motion.section
         style={{ x: textX, y: textY }}
-        className="relative z-10 flex flex-1 flex-col items-center justify-center px-6 text-center lg:max-w-[58%] lg:items-start lg:px-16 lg:text-left xl:px-24"
+        className="relative z-10 flex flex-col items-center px-6 pb-2 pt-14 text-center sm:pt-20 lg:max-w-[58%] lg:flex-1 lg:items-start lg:justify-center lg:px-16 lg:py-10 lg:text-left xl:px-24"
       >
         <motion.div
           initial={{ opacity: 0, y: 14, filter: "blur(8px)" }}
@@ -999,6 +1072,60 @@ export default function MondialForeign() {
         </motion.div>
       </motion.section>
 
+      {/* ---------- Telefon / tablet: küre metnin altında kendi bölümünde ---------- */}
+      {!isDesktop && (
+        <section className="relative z-10 flex flex-col items-center px-4 pb-10">
+          <motion.div
+            className="relative aspect-square w-full max-w-[560px]"
+            initial={{ opacity: 0, scale: 0.92, filter: "blur(10px)" }}
+            animate={{ opacity: 1, scale: 1, filter: "blur(0px)" }}
+            transition={{ duration: 2.2, delay: 0.4, ease: EASE }}
+          >
+            <GlobeCanvas mouse={mouse} lang={lang} compact />
+          </motion.div>
+
+          <motion.div
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 1.2, delay: 1.2, ease: EASE }}
+            className="-mt-2 flex flex-wrap items-center justify-center gap-x-6 gap-y-2 text-[11px] tracking-[0.12em] text-slate-300"
+          >
+            <span className="flex items-center gap-2.5">
+              <span className="h-2 w-2 rounded-full bg-[#F15A24] shadow-[0_0_8px_rgba(241,90,36,0.9)]" />
+              <Swap k={lang}>{c.legendOrigin}</Swap>
+            </span>
+            <span className="flex items-center gap-2.5">
+              <span className="h-2 w-2 rounded-full bg-sky-100 shadow-[0_0_8px_rgba(186,230,253,0.9)]" />
+              <Swap k={lang}>{c.legendDest(COUNTRY_COUNT)}</Swap>
+            </span>
+          </motion.div>
+
+          <motion.div
+            initial={{ opacity: 0, y: 16 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true, margin: "-40px" }}
+            transition={{ duration: 1, ease: EASE }}
+            className="mt-10 w-full max-w-[560px] rounded-2xl border border-white/10 bg-white/[0.03] p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] backdrop-blur-xl"
+          >
+            <h2 className="mb-4 text-center text-[10px] font-medium uppercase tracking-[0.32em] text-sky-100/80">
+              <Swap k={lang}>{c.capitals}</Swap>
+            </h2>
+            <ul className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3">
+              {FRANCOPHONE.map((row) => (
+                <li key={row.country} className="min-w-0">
+                  <span className="block truncate text-[13px] font-medium text-slate-100">
+                    {row.cities.map((d) => (lang === "en" && d.en) || d.name).join(" · ")}
+                  </span>
+                  <span className="block truncate text-[11px] text-slate-500">
+                    {(lang === "en" && COUNTRY_EN[row.country]) || row.country}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </motion.div>
+        </section>
+      )}
+
       {/* ---------- Harita lejantı (masaüstü) ---------- */}
       <motion.div
         initial={{ opacity: 0, y: 12 }}
@@ -1012,7 +1139,7 @@ export default function MondialForeign() {
         </div>
         <div className="flex items-center gap-3">
           <span className="h-2 w-2 rounded-full bg-sky-100 shadow-[0_0_8px_rgba(186,230,253,0.9)]" />
-          <Swap k={lang}>{c.legendDest(DESTINATIONS.length)}</Swap>
+          <Swap k={lang}>{c.legendDest(COUNTRY_COUNT)}</Swap>
         </div>
       </motion.div>
 
